@@ -19,20 +19,23 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 /*
- * JwtAuthenticationFilter runs once for every incoming HTTP request.
+ * JwtAuthenticationFilter runs once for incoming HTTP requests.
  *
  * Main responsibility:
- * - Read JWT token from Authorization header
- * - Validate the token
- * - Extract logged-in user's email
- * - Load user role from database
- * - Set authentication in Spring Security context
+ * 1. Read JWT token from Authorization header
+ * 2. Validate JWT token
+ * 3. Extract logged-in user's email
+ * 4. Load user role from database
+ * 5. Set authentication in Spring Security context
  *
- * After this filter sets authentication, @PreAuthorize can check roles like:
- * hasRole('EMPLOYEE')
- * hasRole('HR_MANAGER')
- * hasRole('ADMIN')
- * hasRole('FINAL_APPROVER')
+ * Important:
+ * This filter should NOT run for public authentication APIs:
+ * - /api/auth/register
+ * - /api/auth/login
+ * - /api/auth/verify-otp
+ *
+ * If this filter runs on register/login, those APIs may return 403
+ * because the user does not have a JWT token yet.
  */
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
@@ -54,13 +57,59 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     }
 
     /*
-     * This method runs for every request.
+     * shouldNotFilter tells Spring Security when this JWT filter
+     * should be skipped completely.
      *
-     * Example requests:
-     * - POST /api/auth/login
-     * - POST /api/auth/register
+     * This is important for:
+     * 1. Public auth APIs
+     * 2. Browser CORS preflight requests
+     */
+    @Override
+    protected boolean shouldNotFilter(HttpServletRequest request) {
+
+        /*
+         * Use request URI because it is more reliable in deployment.
+         *
+         * Example:
+         * /api/auth/register
+         * /api/auth/login
+         * /api/asset-requests/my
+         */
+        String path = request.getRequestURI();
+
+        /*
+         * Skip JWT filter for public authentication routes.
+         *
+         * These endpoints are called before login,
+         * so there will be no Authorization header.
+         */
+        if (path.startsWith("/api/auth")) {
+            return true;
+        }
+
+        /*
+         * Skip JWT filter for CORS preflight requests.
+         *
+         * Browser sends OPTIONS requests before POST/PUT/DELETE
+         * when frontend and backend are hosted on different domains.
+         */
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            return true;
+        }
+
+        /*
+         * For all other requests, run the JWT filter.
+         */
+        return false;
+    }
+
+    /*
+     * This method runs only for requests that are not skipped by shouldNotFilter().
+     *
+     * Example protected requests:
      * - GET /api/users/me
      * - POST /api/asset-requests
+     * - GET /api/asset-requests/my
      */
     @Override
     protected void doFilterInternal(
@@ -68,41 +117,6 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             HttpServletResponse response,
             FilterChain filterChain
     ) throws ServletException, IOException {
-
-        /*
-         * Get the request path.
-         *
-         * Example:
-         * /api/auth/login
-         * /api/asset-requests/my
-         */
-        String path = request.getServletPath();
-
-        /*
-         * Allow authentication APIs without JWT.
-         *
-         * These endpoints are public because the user does not have a token yet.
-         *
-         * Without this block, login/register can fail with 403
-         * because the JWT filter may try to validate a missing token.
-         */
-        if (path.startsWith("/api/auth/")) {
-            filterChain.doFilter(request, response);
-            return;
-        }
-
-        /*
-         * Allow CORS preflight requests.
-         *
-         * Browsers send OPTIONS requests before POST/PUT/DELETE
-         * when frontend and backend are on different domains.
-         *
-         * These requests do not contain JWT tokens.
-         */
-        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
-            filterChain.doFilter(request, response);
-            return;
-        }
 
         /*
          * Read Authorization header.
@@ -113,10 +127,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         String authHeader = request.getHeader("Authorization");
 
         /*
-         * If Authorization header is missing or does not start with Bearer,
-         * do not authenticate here.
+         * If Authorization header is missing or does not start with "Bearer ",
+         * continue without authentication.
          *
-         * Protected APIs will still be blocked later by Spring Security.
+         * Spring Security will later block protected APIs automatically.
          */
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             filterChain.doFilter(request, response);
@@ -132,13 +146,14 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             /*
              * Extract email from JWT token.
              *
-             * This should match the email used during login.
+             * This email was stored inside the token during login.
              */
             String userEmail = jwtService.extractEmail(token);
 
             /*
-             * If email exists and no authentication is already set,
-             * validate token and authenticate the user.
+             * Authenticate only if:
+             * 1. Token contains email
+             * 2. No authentication is already present in SecurityContext
              */
             if (
                     userEmail != null &&
@@ -147,16 +162,15 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 /*
                  * Load user from database.
                  *
-                 * We need this to get the user's current role.
+                 * We need this to get the current role of the user.
                  */
                 User user = userRepository
                         .findByEmail(userEmail)
                         .orElse(null);
 
                 /*
-                 * If user does not exist anymore, continue without authentication.
-                 *
-                 * Spring Security will block protected endpoints.
+                 * If user does not exist anymore,
+                 * continue without authentication.
                  */
                 if (user == null) {
                     filterChain.doFilter(request, response);
@@ -166,10 +180,10 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 /*
                  * Validate JWT token.
                  *
-                 * This usually checks:
-                 * - token email matches user email
-                 * - token is not expired
-                 * - token signature is valid
+                 * Token is valid only if:
+                 * 1. Token email matches user email
+                 * 2. Token is not expired
+                 * 3. Token signature is valid
                  */
                 boolean tokenValid = jwtService.isTokenValid(token, userEmail);
 
@@ -178,11 +192,11 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     /*
                      * Convert database role into Spring Security role.
                      *
-                     * Spring Security expects role authority format:
-                     * ROLE_EMPLOYEE
-                     * ROLE_HR_MANAGER
-                     * ROLE_ADMIN
-                     * ROLE_FINAL_APPROVER
+                     * Example:
+                     * EMPLOYEE       -> ROLE_EMPLOYEE
+                     * HR_MANAGER     -> ROLE_HR_MANAGER
+                     * ADMIN          -> ROLE_ADMIN
+                     * FINAL_APPROVER -> ROLE_FINAL_APPROVER
                      */
                     String roleName = user.getRole().getName().name();
 
@@ -197,7 +211,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                      * - userEmail
                      *
                      * Credentials:
-                     * - null because password is not needed here
+                     * - null because password is not needed for JWT request
                      *
                      * Authorities:
                      * - user's role
@@ -210,7 +224,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                             );
 
                     /*
-                     * Attach request details such as remote address/session info.
+                     * Attach request details such as remote address.
                      */
                     authenticationToken.setDetails(
                             new WebAuthenticationDetailsSource()
@@ -220,8 +234,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                     /*
                      * Store authentication in SecurityContext.
                      *
-                     * After this, controllers and @PreAuthorize can identify
-                     * the logged-in user and their role.
+                     * After this, @PreAuthorize can check the user's role.
                      */
                     SecurityContextHolder
                             .getContext()
@@ -232,9 +245,9 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         } catch (Exception ex) {
             /*
              * If token is invalid, expired, malformed, or cannot be parsed,
-             * clear security context.
+             * clear the SecurityContext.
              *
-             * Do not throw error here.
+             * Do not throw an exception here.
              * Spring Security will reject protected endpoints naturally.
              */
             SecurityContextHolder.clearContext();
