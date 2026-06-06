@@ -25,7 +25,7 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
  * 2. Protected APIs
  * 3. JWT authentication
  * 4. Password encryption
- * 5. CORS settings for React frontend
+ * 5. CORS settings for React/Vercel frontend
  */
 @Configuration
 @EnableMethodSecurity
@@ -91,9 +91,10 @@ public class SecurityConfig {
              * Authorization rules.
              *
              * Order is important:
-             * 1. OPTIONS requests are allowed for browser preflight.
-             * 2. /api/auth/** is public for register/login/OTP.
-             * 3. All other APIs require authentication.
+             * 1. OPTIONS requests are allowed for browser CORS preflight.
+             * 2. /error is public so real backend errors are not hidden as 403.
+             * 3. /api/auth/** is public for register/login/OTP.
+             * 4. All other APIs require authentication.
              */
             .authorizeHttpRequests(auth -> auth
 
@@ -103,17 +104,24 @@ public class SecurityConfig {
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
                 /*
+                 * Allow Spring Boot error route.
+                 *
+                 * Without this, real backend errors can sometimes appear as 403.
+                 */
+                .requestMatchers("/error").permitAll()
+
+                /*
                  * Public authentication APIs.
                  *
                  * These should work without JWT:
-                 * - register
-                 * - login
-                 * - OTP verification
+                 * - POST /api/auth/register
+                 * - POST /api/auth/login
+                 * - POST /api/auth/verify-otp
                  */
                 .requestMatchers("/api/auth/**").permitAll()
 
                 /*
-                 * Every other API requires JWT.
+                 * Every other API requires JWT authentication.
                  */
                 .anyRequest().authenticated()
             )
@@ -144,7 +152,7 @@ public class SecurityConfig {
         /*
          * Allowed frontend URLs.
          *
-         * Local:
+         * Local frontend:
          * http://localhost:5173
          * http://127.0.0.1:5173
          *
@@ -187,8 +195,7 @@ public class SecurityConfig {
         /*
          * Allow credentials.
          *
-         * Safe because we are using specific origins,
-         * not wildcard "*".
+         * Safe because we are using specific origins, not wildcard "*".
          */
         configuration.setAllowCredentials(true);
 
