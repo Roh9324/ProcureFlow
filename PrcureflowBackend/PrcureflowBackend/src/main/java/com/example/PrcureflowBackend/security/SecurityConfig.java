@@ -21,29 +21,22 @@ import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
  * SecurityConfig is the main Spring Security configuration class.
  *
  * It controls:
- * 1. Which APIs are public
- * 2. Which APIs require JWT authentication
- * 3. Password encryption
- * 4. JWT filter registration
- * 5. CORS permission for React frontend
+ * 1. Public APIs
+ * 2. Protected APIs
+ * 3. JWT authentication
+ * 4. Password encryption
+ * 5. CORS settings for React frontend
  */
 @Configuration
 @EnableMethodSecurity
 public class SecurityConfig {
 
-    /*
-     * JwtAuthenticationFilter is our custom JWT filter.
-     *
-     * It checks protected requests for a JWT token.
-     * If the token is valid, it sets the logged-in user
-     * inside Spring SecurityContext.
-     */
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
     /*
      * Constructor injection.
      *
-     * Spring automatically injects JwtAuthenticationFilter here.
+     * Spring injects our custom JWT filter.
      */
     public SecurityConfig(JwtAuthenticationFilter jwtAuthenticationFilter) {
         this.jwtAuthenticationFilter = jwtAuthenticationFilter;
@@ -52,11 +45,9 @@ public class SecurityConfig {
     /*
      * PasswordEncoder bean.
      *
-     * This is used for:
-     * 1. Encrypting passwords during registration
-     * 2. Matching encrypted passwords during login
-     *
-     * BCrypt is a secure password hashing algorithm.
+     * Used for:
+     * 1. Encrypting password during registration
+     * 2. Matching password during login
      */
     @Bean
     public PasswordEncoder passwordEncoder() {
@@ -64,42 +55,33 @@ public class SecurityConfig {
     }
 
     /*
-     * SecurityFilterChain defines the complete security rules.
+     * Main security filter chain.
      *
-     * This is where we configure:
+     * This defines:
      * - CORS
      * - CSRF
-     * - Stateless session policy
+     * - Stateless JWT session
      * - Public/private routes
-     * - JWT filter
+     * - JWT filter registration
      */
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
 
         http
             /*
-             * Enable CORS.
-             *
-             * This uses the corsConfigurationSource() bean below.
-             * It allows your React frontend to call backend APIs.
+             * Enable CORS using corsConfigurationSource().
              */
             .cors(Customizer.withDefaults())
 
             /*
-             * Disable CSRF.
-             *
-             * CSRF is mainly needed for session/cookie-based web apps.
-             * This project uses JWT tokens and stateless REST APIs,
-             * so CSRF is disabled.
+             * Disable CSRF because this is a stateless REST API using JWT.
              */
             .csrf(csrf -> csrf.disable())
 
             /*
-             * Make backend stateless.
+             * Disable server-side sessions.
              *
-             * Stateless means:
-             * - No server-side session is stored.
-             * - Every protected request must send JWT token.
+             * Every protected request must send JWT token.
              */
             .sessionManagement(session ->
                 session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
@@ -108,46 +90,41 @@ public class SecurityConfig {
             /*
              * Authorization rules.
              *
-             * Important order:
-             * 1. OPTIONS requests must be public for browser CORS preflight.
-             * 2. /api/auth/** must be public because login/register happen before JWT exists.
-             * 3. Everything else requires authentication.
+             * Order is important:
+             * 1. OPTIONS requests are allowed for browser preflight.
+             * 2. /api/auth/** is public for register/login/OTP.
+             * 3. All other APIs require authentication.
              */
             .authorizeHttpRequests(auth -> auth
 
                 /*
-                 * Allow all OPTIONS requests.
-                 *
-                 * Browser sends OPTIONS request before POST/PUT/DELETE
-                 * when frontend and backend are on different domains.
+                 * Allow browser CORS preflight requests.
                  */
                 .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
 
                 /*
-                 * Public authentication endpoints.
+                 * Public authentication APIs.
                  *
-                 * These endpoints should not require JWT:
-                 * - POST /api/auth/register
-                 * - POST /api/auth/login
-                 * - POST /api/auth/verify-otp
+                 * These should work without JWT:
+                 * - register
+                 * - login
+                 * - OTP verification
                  */
                 .requestMatchers("/api/auth/**").permitAll()
 
                 /*
-                 * All other endpoints require JWT authentication.
+                 * Every other API requires JWT.
                  */
                 .anyRequest().authenticated()
             )
 
             /*
-             * Register JWT filter before Spring Security's default
+             * Register custom JWT filter before Spring Security's
              * UsernamePasswordAuthenticationFilter.
-             *
-             * This ensures JWT is checked before protected controller methods run.
              */
             .addFilterBefore(
-                jwtAuthenticationFilter,
-                UsernamePasswordAuthenticationFilter.class
+                    jwtAuthenticationFilter,
+                    UsernamePasswordAuthenticationFilter.class
             );
 
         return http.build();
@@ -156,22 +133,8 @@ public class SecurityConfig {
     /*
      * CORS configuration.
      *
-     * CORS stands for Cross-Origin Resource Sharing.
-     *
-     * Your frontend and backend run on different origins:
-     *
-     * Local frontend:
-     * http://localhost:5173
-     * http://127.0.0.1:5173
-     *
-     * Live frontend:
-     * https://procure-flow-kvp9.vercel.app
-     *
-     * Live backend:
-     * https://procureflow-backend-knk5.onrender.com
-     *
-     * The browser blocks cross-origin API calls unless backend explicitly
-     * allows the frontend origin.
+     * Allows local frontend and deployed Vercel frontend
+     * to call the backend.
      */
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
@@ -179,9 +142,14 @@ public class SecurityConfig {
         CorsConfiguration configuration = new CorsConfiguration();
 
         /*
-         * Allowed frontend origins.
+         * Allowed frontend URLs.
          *
-         * Only these frontend URLs can call the backend from browser.
+         * Local:
+         * http://localhost:5173
+         * http://127.0.0.1:5173
+         *
+         * Deployed frontend:
+         * https://procure-flow-kvp9.vercel.app
          */
         configuration.setAllowedOrigins(List.of(
                 "http://localhost:5173",
@@ -191,12 +159,6 @@ public class SecurityConfig {
 
         /*
          * Allowed HTTP methods.
-         *
-         * GET     -> fetch data
-         * POST    -> create/login/register
-         * PUT     -> update workflow status
-         * DELETE  -> delete data if needed
-         * OPTIONS -> CORS preflight request
          */
         configuration.setAllowedMethods(List.of(
                 "GET",
@@ -207,11 +169,7 @@ public class SecurityConfig {
         ));
 
         /*
-         * Allowed headers.
-         *
-         * The frontend sends:
-         * - Content-Type: application/json
-         * - Authorization: Bearer <token>
+         * Allowed request headers from frontend.
          */
         configuration.setAllowedHeaders(List.of(
                 "Authorization",
@@ -220,9 +178,7 @@ public class SecurityConfig {
         ));
 
         /*
-         * Exposed headers.
-         *
-         * This allows frontend JavaScript to read these response headers if needed.
+         * Headers frontend is allowed to read from response.
          */
         configuration.setExposedHeaders(List.of(
                 "Authorization"
@@ -231,20 +187,18 @@ public class SecurityConfig {
         /*
          * Allow credentials.
          *
-         * This is safe because allowed origins are specific,
+         * Safe because we are using specific origins,
          * not wildcard "*".
          */
         configuration.setAllowCredentials(true);
 
         /*
          * Cache preflight response for 1 hour.
-         *
-         * This reduces repeated OPTIONS requests from the browser.
          */
         configuration.setMaxAge(3600L);
 
         /*
-         * Apply this CORS configuration to every backend route.
+         * Apply CORS to all backend routes.
          */
         UrlBasedCorsConfigurationSource source =
                 new UrlBasedCorsConfigurationSource();
