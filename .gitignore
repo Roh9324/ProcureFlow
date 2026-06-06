@@ -1,0 +1,61 @@
+# =========================
+# Backend / Spring Boot
+# =========================
+PrcureflowBackend/**/target/
+PrcureflowBackend/**/src/main/resources/application-local.properties
+PrcureflowBackend/**/src/main/resources/application_local.properties
+PrcureflowBackend/**/.mvn/wrapper/maven-wrapper.jar
+
+*.class
+
+# =========================
+# Frontend / React / Vite
+# =========================
+ProcureFlowFrontEnd/node_modules/
+ProcureFlowFrontEnd/dist/
+ProcureFlowFrontEnd/.vite/
+ProcureFlowFrontEnd/.env
+
+# =========================
+# Env / Secrets
+# =========================
+.env
+*.env
+**/application-local.properties
+**/application_local.properties
+
+# Allow example env files
+!.env.example
+!ProcureFlowFrontEnd/.env.example
+
+# =========================
+# Eclipse / STS
+# =========================
+.metadata/
+.apt_generated/
+.classpath
+.factorypath
+.project
+.settings/
+.springBeans
+.sts4-cache/
+
+# =========================
+# IntelliJ
+# =========================
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# =========================
+# VS Code
+# =========================
+.vscode/
+
+# =========================
+# Logs / OS
+# =========================
+*.log
+.DS_Store
+Thumbs.db
