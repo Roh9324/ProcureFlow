@@ -1,11 +1,12 @@
 package com.example.PrcureflowBackend.security;
 
 import java.io.IOException;
-import java.util.Collections;
+import java.util.List;
 
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
 import org.springframework.security.core.context.SecurityContextHolder;
+import org.springframework.security.web.authentication.WebAuthenticationDetailsSource;
 import org.springframework.stereotype.Component;
 import org.springframework.web.filter.OncePerRequestFilter;
 
@@ -18,13 +19,20 @@ import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 
 /*
- * JwtAuthenticationFilter runs before protected API requests.
+ * JwtAuthenticationFilter runs once for every incoming HTTP request.
  *
- * Its job:
- * 1. Read JWT token from Authorization header
- * 2. Validate token
- * 3. Find user from database
- * 4. Tell Spring Security that this request is authenticated
+ * Main responsibility:
+ * - Read JWT token from Authorization header
+ * - Validate the token
+ * - Extract logged-in user's email
+ * - Load user role from database
+ * - Set authentication in Spring Security context
+ *
+ * After this filter sets authentication, @PreAuthorize can check roles like:
+ * hasRole('EMPLOYEE')
+ * hasRole('HR_MANAGER')
+ * hasRole('ADMIN')
+ * hasRole('FINAL_APPROVER')
  */
 @Component
 public class JwtAuthenticationFilter extends OncePerRequestFilter {
@@ -35,9 +43,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     /*
      * Constructor injection.
      *
-     * Spring automatically provides:
-     * - JwtService
-     * - UserRepository
+     * Spring automatically injects JwtService and UserRepository.
      */
     public JwtAuthenticationFilter(
             JwtService jwtService,
@@ -48,11 +54,13 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     }
 
     /*
-     * This method runs for every HTTP request.
+     * This method runs for every request.
      *
-     * Example:
-     * GET /api/users/me
-     * POST /api/asset-requests
+     * Example requests:
+     * - POST /api/auth/login
+     * - POST /api/auth/register
+     * - GET /api/users/me
+     * - POST /api/asset-requests
      */
     @Override
     protected void doFilterInternal(
@@ -62,18 +70,53 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
     ) throws ServletException, IOException {
 
         /*
-         * Get Authorization header from request.
+         * Get the request path.
+         *
+         * Example:
+         * /api/auth/login
+         * /api/asset-requests/my
+         */
+        String path = request.getServletPath();
+
+        /*
+         * Allow authentication APIs without JWT.
+         *
+         * These endpoints are public because the user does not have a token yet.
+         *
+         * Without this block, login/register can fail with 403
+         * because the JWT filter may try to validate a missing token.
+         */
+        if (path.startsWith("/api/auth/")) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        /*
+         * Allow CORS preflight requests.
+         *
+         * Browsers send OPTIONS requests before POST/PUT/DELETE
+         * when frontend and backend are on different domains.
+         *
+         * These requests do not contain JWT tokens.
+         */
+        if ("OPTIONS".equalsIgnoreCase(request.getMethod())) {
+            filterChain.doFilter(request, response);
+            return;
+        }
+
+        /*
+         * Read Authorization header.
          *
          * Expected format:
-         * Authorization: Bearer jwt_token_here
+         * Authorization: Bearer <jwt-token>
          */
         String authHeader = request.getHeader("Authorization");
 
         /*
          * If Authorization header is missing or does not start with Bearer,
-         * continue request without authentication.
+         * do not authenticate here.
          *
-         * Public APIs like /api/auth/login do not need token.
+         * Protected APIs will still be blocked later by Spring Security.
          */
         if (authHeader == null || !authHeader.startsWith("Bearer ")) {
             filterChain.doFilter(request, response);
@@ -81,77 +124,124 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
         }
 
         /*
-         * Remove "Bearer " from header and keep only token.
-         *
-         * Example:
-         * Bearer abc.xyz.token
-         * becomes:
-         * abc.xyz.token
+         * Remove "Bearer " prefix and keep only the token.
          */
         String token = authHeader.substring(7);
 
-        /*
-         * Extract email from token.
-         * Email was stored as JWT subject when token was created.
-         */
-        String email = jwtService.extractEmail(token);
-
-        /*
-         * Authenticate only if:
-         * 1. email exists in token
-         * 2. Spring Security context does not already have authentication
-         */
-        if (email != null && SecurityContextHolder.getContext().getAuthentication() == null) {
+        try {
+            /*
+             * Extract email from JWT token.
+             *
+             * This should match the email used during login.
+             */
+            String userEmail = jwtService.extractEmail(token);
 
             /*
-             * Find user in database using email from token.
+             * If email exists and no authentication is already set,
+             * validate token and authenticate the user.
              */
-            User user = userRepository
-                    .findByEmail(email)
-                    .orElse(null);
-
-            /*
-             * If user exists and token is valid,
-             * create authentication object for Spring Security.
-             */
-            if (user != null && jwtService.isTokenValid(token)) {
+            if (
+                    userEmail != null &&
+                    SecurityContextHolder.getContext().getAuthentication() == null
+            ) {
+                /*
+                 * Load user from database.
+                 *
+                 * We need this to get the user's current role.
+                 */
+                User user = userRepository
+                        .findByEmail(userEmail)
+                        .orElse(null);
 
                 /*
-                 * Spring Security roles usually start with "ROLE_".
+                 * If user does not exist anymore, continue without authentication.
                  *
-                 * Example:
-                 * EMPLOYEE becomes ROLE_EMPLOYEE
-                 * HR_MANAGER becomes ROLE_HR_MANAGER
+                 * Spring Security will block protected endpoints.
                  */
-                String roleName = user.getRole() != null
-                        ? "ROLE_" + user.getRole().getName().name()
-                        : "ROLE_EMPLOYEE";
+                if (user == null) {
+                    filterChain.doFilter(request, response);
+                    return;
+                }
 
                 /*
-                 * Create Spring Security authentication object.
+                 * Validate JWT token.
                  *
-                 * Principal = user email
-                 * Credentials = null because password is not needed here
-                 * Authorities = user role
+                 * This usually checks:
+                 * - token email matches user email
+                 * - token is not expired
+                 * - token signature is valid
                  */
-                UsernamePasswordAuthenticationToken authentication =
-                        new UsernamePasswordAuthenticationToken(
-                                user.getEmail(),
-                                null,
-                                Collections.singletonList(new SimpleGrantedAuthority(roleName))
-                        );
+                boolean tokenValid = jwtService.isTokenValid(token, userEmail);
 
-                /*
-                 * Store authentication in SecurityContext.
-                 *
-                 * After this, Spring knows this request is authenticated.
-                 */
-                SecurityContextHolder.getContext().setAuthentication(authentication);
+                if (tokenValid) {
+
+                    /*
+                     * Convert database role into Spring Security role.
+                     *
+                     * Spring Security expects role authority format:
+                     * ROLE_EMPLOYEE
+                     * ROLE_HR_MANAGER
+                     * ROLE_ADMIN
+                     * ROLE_FINAL_APPROVER
+                     */
+                    String roleName = user.getRole().getName().name();
+
+                    List<SimpleGrantedAuthority> authorities = List.of(
+                            new SimpleGrantedAuthority("ROLE_" + roleName)
+                    );
+
+                    /*
+                     * Create Spring Security authentication object.
+                     *
+                     * Principal:
+                     * - userEmail
+                     *
+                     * Credentials:
+                     * - null because password is not needed here
+                     *
+                     * Authorities:
+                     * - user's role
+                     */
+                    UsernamePasswordAuthenticationToken authenticationToken =
+                            new UsernamePasswordAuthenticationToken(
+                                    userEmail,
+                                    null,
+                                    authorities
+                            );
+
+                    /*
+                     * Attach request details such as remote address/session info.
+                     */
+                    authenticationToken.setDetails(
+                            new WebAuthenticationDetailsSource()
+                                    .buildDetails(request)
+                    );
+
+                    /*
+                     * Store authentication in SecurityContext.
+                     *
+                     * After this, controllers and @PreAuthorize can identify
+                     * the logged-in user and their role.
+                     */
+                    SecurityContextHolder
+                            .getContext()
+                            .setAuthentication(authenticationToken);
+                }
             }
+
+        } catch (Exception ex) {
+            /*
+             * If token is invalid, expired, malformed, or cannot be parsed,
+             * clear security context.
+             *
+             * Do not throw error here.
+             * Spring Security will reject protected endpoints naturally.
+             */
+            SecurityContextHolder.clearContext();
         }
 
         /*
-         * Continue request to controller.
+         * Continue request processing.
          */
         filterChain.doFilter(request, response);
     }

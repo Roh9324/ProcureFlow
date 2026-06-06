@@ -4,7 +4,9 @@ import java.util.List;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -14,13 +16,13 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
-import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+
 /*
- * SecurityConfig is the main security configuration class.
+ * SecurityConfig is the main Spring Security configuration class.
  *
  * It controls:
  * 1. Which APIs are public
- * 2. Which APIs require login/JWT
+ * 2. Which APIs require JWT authentication
  * 3. Password encryption
  * 4. JWT filter registration
  * 5. CORS permission for React frontend
@@ -30,10 +32,11 @@ import org.springframework.security.config.annotation.method.configuration.Enabl
 public class SecurityConfig {
 
     /*
-     * JwtAuthenticationFilter is our custom filter.
+     * JwtAuthenticationFilter is our custom JWT filter.
      *
-     * It checks incoming requests for JWT tokens.
-     * If a valid token is found, it authenticates the user.
+     * It checks protected requests for a JWT token.
+     * If the token is valid, it sets the logged-in user
+     * inside Spring SecurityContext.
      */
     private final JwtAuthenticationFilter jwtAuthenticationFilter;
 
@@ -49,11 +52,11 @@ public class SecurityConfig {
     /*
      * PasswordEncoder bean.
      *
-     * This is used in AuthService for:
-     * 1. Encrypting password during registration
-     * 2. Matching password during login
+     * This is used for:
+     * 1. Encrypting passwords during registration
+     * 2. Matching encrypted passwords during login
      *
-     * BCryptPasswordEncoder stores passwords securely.
+     * BCrypt is a secure password hashing algorithm.
      */
     @Bean
     public PasswordEncoder passwordEncoder() {
@@ -61,12 +64,12 @@ public class SecurityConfig {
     }
 
     /*
-     * SecurityFilterChain defines the security rules for the application.
+     * SecurityFilterChain defines the complete security rules.
      *
      * This is where we configure:
      * - CORS
      * - CSRF
-     * - Session policy
+     * - Stateless session policy
      * - Public/private routes
      * - JWT filter
      */
@@ -75,32 +78,28 @@ public class SecurityConfig {
 
         http
             /*
-             * Enable CORS configuration.
+             * Enable CORS.
              *
-             * This allows the React frontend running on port 5173
-             * to call the Spring Boot backend running on port 8081.
+             * This uses the corsConfigurationSource() bean below.
+             * It allows your React frontend to call backend APIs.
              */
             .cors(Customizer.withDefaults())
 
             /*
              * Disable CSRF.
              *
-             * CSRF protection is mainly needed for traditional web apps
-             * that use server-side sessions and cookies.
-             *
-             * Our backend is a stateless REST API using JWT tokens,
-             * so CSRF can be disabled.
+             * CSRF is mainly needed for session/cookie-based web apps.
+             * This project uses JWT tokens and stateless REST APIs,
+             * so CSRF is disabled.
              */
             .csrf(csrf -> csrf.disable())
 
             /*
-             * Make the application stateless.
+             * Make backend stateless.
              *
              * Stateless means:
-             * - Backend will not store user session.
+             * - No server-side session is stored.
              * - Every protected request must send JWT token.
-             *
-             * This is standard for REST APIs using JWT.
              */
             .sessionManagement(session ->
                 session.sessionCreationPolicy(SessionCreationPolicy.STATELESS)
@@ -109,24 +108,42 @@ public class SecurityConfig {
             /*
              * Authorization rules.
              *
-             * /api/auth/** is public because users must be able to:
-             * - register
-             * - verify OTP
-             * - login
-             *
-             * All other APIs require authentication.
+             * Important order:
+             * 1. OPTIONS requests must be public for browser CORS preflight.
+             * 2. /api/auth/** must be public because login/register happen before JWT exists.
+             * 3. Everything else requires authentication.
              */
             .authorizeHttpRequests(auth -> auth
+
+                /*
+                 * Allow all OPTIONS requests.
+                 *
+                 * Browser sends OPTIONS request before POST/PUT/DELETE
+                 * when frontend and backend are on different domains.
+                 */
+                .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
+
+                /*
+                 * Public authentication endpoints.
+                 *
+                 * These endpoints should not require JWT:
+                 * - POST /api/auth/register
+                 * - POST /api/auth/login
+                 * - POST /api/auth/verify-otp
+                 */
                 .requestMatchers("/api/auth/**").permitAll()
+
+                /*
+                 * All other endpoints require JWT authentication.
+                 */
                 .anyRequest().authenticated()
             )
 
             /*
-             * Add our JWT filter before Spring Security's default
+             * Register JWT filter before Spring Security's default
              * UsernamePasswordAuthenticationFilter.
              *
-             * This ensures JWT token is checked before the request
-             * reaches protected controllers.
+             * This ensures JWT is checked before protected controller methods run.
              */
             .addFilterBefore(
                 jwtAuthenticationFilter,
@@ -141,18 +158,20 @@ public class SecurityConfig {
      *
      * CORS stands for Cross-Origin Resource Sharing.
      *
-     * Your React frontend runs on:
+     * Your frontend and backend run on different origins:
+     *
+     * Local frontend:
      * http://localhost:5173
-     * or
      * http://127.0.0.1:5173
      *
-     * Your Spring Boot backend runs on:
-     * http://localhost:8081
+     * Live frontend:
+     * https://procure-flow-kvp9.vercel.app
      *
-     * Since frontend and backend have different ports,
-     * the browser treats them as different origins.
+     * Live backend:
+     * https://procureflow-backend-knk5.onrender.com
      *
-     * This configuration allows React to call Spring Boot APIs.
+     * The browser blocks cross-origin API calls unless backend explicitly
+     * allows the frontend origin.
      */
     @Bean
     public CorsConfigurationSource corsConfigurationSource() {
@@ -162,8 +181,7 @@ public class SecurityConfig {
         /*
          * Allowed frontend origins.
          *
-         * Add both localhost and 127.0.0.1 because sometimes Vite opens
-         * the app using 127.0.0.1 instead of localhost.
+         * Only these frontend URLs can call the backend from browser.
          */
         configuration.setAllowedOrigins(List.of(
                 "http://localhost:5173",
@@ -174,11 +192,11 @@ public class SecurityConfig {
         /*
          * Allowed HTTP methods.
          *
-         * GET    → fetch data
-         * POST   → create data
-         * PUT    → update data
-         * DELETE → delete data
-         * OPTIONS → browser preflight request for CORS
+         * GET     -> fetch data
+         * POST    -> create/login/register
+         * PUT     -> update workflow status
+         * DELETE  -> delete data if needed
+         * OPTIONS -> CORS preflight request
          */
         configuration.setAllowedMethods(List.of(
                 "GET",
@@ -189,26 +207,44 @@ public class SecurityConfig {
         ));
 
         /*
-         * Allow all headers.
+         * Allowed headers.
          *
-         * This is needed because frontend sends headers like:
-         * Content-Type: application/json
-         * Authorization: Bearer <token>
+         * The frontend sends:
+         * - Content-Type: application/json
+         * - Authorization: Bearer <token>
          */
-        configuration.setAllowedHeaders(List.of("*"));
+        configuration.setAllowedHeaders(List.of(
+                "Authorization",
+                "Content-Type",
+                "Accept"
+        ));
+
+        /*
+         * Exposed headers.
+         *
+         * This allows frontend JavaScript to read these response headers if needed.
+         */
+        configuration.setExposedHeaders(List.of(
+                "Authorization"
+        ));
 
         /*
          * Allow credentials.
          *
-         * This allows browser requests to include credentials if needed.
-         * For JWT header-based auth, this is safe for local development.
+         * This is safe because allowed origins are specific,
+         * not wildcard "*".
          */
         configuration.setAllowCredentials(true);
 
         /*
-         * Register this CORS configuration for all backend routes.
+         * Cache preflight response for 1 hour.
          *
-         * /** means every API endpoint.
+         * This reduces repeated OPTIONS requests from the browser.
+         */
+        configuration.setMaxAge(3600L);
+
+        /*
+         * Apply this CORS configuration to every backend route.
          */
         UrlBasedCorsConfigurationSource source =
                 new UrlBasedCorsConfigurationSource();

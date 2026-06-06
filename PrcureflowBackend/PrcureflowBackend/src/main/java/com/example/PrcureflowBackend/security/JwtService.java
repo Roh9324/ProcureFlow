@@ -2,6 +2,9 @@ package com.example.PrcureflowBackend.security;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Date;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Function;
 
 import javax.crypto.SecretKey;
 
@@ -15,97 +18,117 @@ import io.jsonwebtoken.Jwts;
 import io.jsonwebtoken.security.Keys;
 
 /*
- * JwtService is responsible for:
+ * JwtService contains all JWT-related logic.
+ *
+ * It is responsible for:
  * 1. Generating JWT tokens after successful login
- * 2. Extracting user email from JWT token
- * 3. Validating whether a JWT token is still valid
+ * 2. Extracting email from JWT token
+ * 3. Extracting claims from JWT token
+ * 4. Checking token expiration
+ * 5. Validating token before allowing protected API access
  */
 @Service
 public class JwtService {
 
     /*
-     * Reads jwt.secret value from application.properties.
-     * This secret is used to sign and verify JWT tokens.
+     * Secret key used to sign and verify JWT tokens.
+     *
+     * Local:
+     * jwt.secret=...
+     *
+     * Render:
+     * JWT_SECRET=...
+     *
+     * application.properties maps:
+     * jwt.secret=${JWT_SECRET}
      */
     @Value("${jwt.secret}")
     private String jwtSecret;
 
     /*
-     * Reads jwt.expiration value from application.properties.
-     * This controls how long the token remains valid.
+     * Token expiration time in milliseconds.
+     *
+     * Example:
+     * 86400000 = 24 hours
      */
     @Value("${jwt.expiration}")
     private long jwtExpiration;
 
     /*
-     * Converts the plain jwtSecret string into a SecretKey object.
-     * This key is used by JJWT to sign and verify the token.
-     */
-    private SecretKey getSigningKey() {
-        return Keys.hmacShaKeyFor(jwtSecret.getBytes(StandardCharsets.UTF_8));
-    }
-
-    /*
-     * Generates a JWT token for a logged-in user.
+     * Generates JWT token for the logged-in user.
      *
-     * The token contains:
-     * - subject: user's email
-     * - userId
-     * - name
-     * - role
-     * - issue time
-     * - expiration time
+     * The frontend stores this token and sends it later as:
+     * Authorization: Bearer <token>
      */
     public String generateToken(User user) {
 
-        String roleName = user.getRole() != null
-                ? user.getRole().getName().name()
-                : null;
+        /*
+         * Claims are extra information stored inside the JWT.
+         *
+         * We store role inside the token for convenience.
+         * The main identity is still the user's email.
+         */
+        Map<String, Object> claims = new HashMap<>();
 
+        if (user.getRole() != null && user.getRole().getName() != null) {
+            claims.put("role", user.getRole().getName().name());
+        }
+
+        /*
+         * Build and sign the JWT token.
+         *
+         * This syntax uses the newer JJWT API:
+         * - claims()
+         * - subject()
+         * - issuedAt()
+         * - expiration()
+         * - signWith()
+         */
         return Jwts.builder()
+                .claims(claims)
                 .subject(user.getEmail())
-                .claim("userId", user.getId())
-                .claim("name", user.getName())
-                .claim("role", roleName)
-                .issuedAt(new Date())
+                .issuedAt(new Date(System.currentTimeMillis()))
                 .expiration(new Date(System.currentTimeMillis() + jwtExpiration))
                 .signWith(getSigningKey())
                 .compact();
     }
 
     /*
-     * Extracts the email from the JWT token.
+     * Extracts user email from JWT token.
      *
-     * In our JWT, the email is stored as the subject.
+     * The email is stored as the JWT subject.
      */
     public String extractEmail(String token) {
-        return extractAllClaims(token).getSubject();
+        return extractClaim(token, Claims::getSubject);
     }
 
     /*
-     * Checks whether the token is valid.
-     *
-     * Currently, we only check whether it is expired or not.
-     * Later, we can add extra checks if needed.
+     * Extracts token expiration date.
      */
-    public boolean isTokenValid(String token) {
-        return !isTokenExpired(token);
+    public Date extractExpiration(String token) {
+        return extractClaim(token, Claims::getExpiration);
     }
 
     /*
-     * Checks whether the token expiration date is before current time.
-     */
-    private boolean isTokenExpired(String token) {
-        return extractAllClaims(token)
-                .getExpiration()
-                .before(new Date());
-    }
-
-    /*
-     * Extracts all claims/data from the token.
+     * Generic method to extract any claim from JWT token.
      *
-     * Claims are the information stored inside JWT:
-     * email, userId, name, role, expiration, etc.
+     * This avoids repeating parsing logic for every claim.
+     */
+    public <T> T extractClaim(
+            String token,
+            Function<Claims, T> claimsResolver
+    ) {
+        final Claims claims = extractAllClaims(token);
+        return claimsResolver.apply(claims);
+    }
+
+    /*
+     * Extracts all claims from JWT token.
+     *
+     * This method also verifies the token signature.
+     *
+     * Important:
+     * Your JJWT version uses Jwts.parser(), not Jwts.parserBuilder().
      */
     private Claims extractAllClaims(String token) {
         return Jwts.parser()
@@ -113,5 +136,42 @@ public class JwtService {
                 .build()
                 .parseSignedClaims(token)
                 .getPayload();
+    }
+
+    /*
+     * Checks if the token is expired.
+     *
+     * If expiration date is before current date/time,
+     * the token is expired.
+     */
+    private boolean isTokenExpired(String token) {
+        return extractExpiration(token).before(new Date());
+    }
+
+    /*
+     * Validates JWT token.
+     *
+     * Token is valid only if:
+     * 1. Email inside token matches expected user email
+     * 2. Token is not expired
+     */
+    public boolean isTokenValid(String token, String userEmail) {
+
+        String extractedEmail = extractEmail(token);
+
+        return extractedEmail.equals(userEmail) && !isTokenExpired(token);
+    }
+
+    /*
+     * Creates signing key from jwtSecret.
+     *
+     * Keys.hmacShaKeyFor requires a strong enough secret.
+     * Keep JWT_SECRET long in Render environment variables.
+     */
+    private SecretKey getSigningKey() {
+
+        byte[] keyBytes = jwtSecret.getBytes(StandardCharsets.UTF_8);
+
+        return Keys.hmacShaKeyFor(keyBytes);
     }
 }
